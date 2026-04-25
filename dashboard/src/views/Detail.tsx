@@ -1,6 +1,5 @@
 import { useMemo, useState } from 'react';
 import { RangePicker, type RangeValue } from '../components/RangePicker';
-import { MetricCard } from '../components/MetricCard';
 import { DetailChart } from '../components/DetailChart';
 import { useFeeds } from '../lib/useFeeds';
 import { METRICS } from '../lib/thingspeak';
@@ -26,6 +25,7 @@ export function Detail({ lang, thresholds }: Props) {
   });
 
   const spanDays = useMemo(() => {
+    if (range.preset === '6h') return 0.25;
     if (range.preset === '24h') return 1;
     if (range.preset === '7d') return 7;
     if (range.preset === '30d') return 30;
@@ -61,12 +61,6 @@ export function Detail({ lang, thresholds }: Props) {
           {errorStatus === 500 ? t('errorConfig', lang) : t('errorLoad', lang)}
         </div>
       ) : null}
-
-      <div className="grid gap-3">
-        {METRICS.map((m) => (
-          <MetricCard key={m} metric={m} readings={readings} thresholds={thresholds} lang={lang} />
-        ))}
-      </div>
 
       <div className="flex flex-col gap-3">
         {METRICS.map((m) => (

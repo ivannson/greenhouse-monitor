@@ -16,7 +16,7 @@ export function BottomTabs({ tab, onChange, lang }: Props) {
       aria-label="Primary"
     >
       <div className="mx-auto flex max-w-md gap-1">
-        {(['detail', 'overview'] as const).map((key) => {
+        {(['overview', 'detail'] as const).map((key) => {
           const active = tab === key;
           return (
             <button

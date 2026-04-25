@@ -1,4 +1,5 @@
 import type { MetricKey, Reading } from './thingspeak';
+import { dayKeyMsk } from './tz';
 
 export interface WindowStat {
   /** Numeric key (window index). */
@@ -8,6 +9,12 @@ export interface WindowStat {
   mean: number;
   min: number;
   max: number;
+  count: number;
+}
+
+export interface DailyAverageStat {
+  day: string;
+  avg: number;
   count: number;
 }
 
@@ -94,4 +101,26 @@ export function windowedStats(
   }
   out.sort((a, b) => a.midMs - b.midMs);
   return out;
+}
+
+export function dailyAverageStats(readings: Reading[], metric: MetricKey): DailyAverageStat[] {
+  const byDay = new Map<string, { sum: number; count: number }>();
+  for (const r of readings) {
+    const v = extract(r, metric);
+    if (v == null) continue;
+    const ts = new Date(r.ts).getTime();
+    if (!Number.isFinite(ts)) continue;
+    const day = dayKeyMsk(ts);
+    const bucket = byDay.get(day);
+    if (bucket) {
+      bucket.sum += v;
+      bucket.count += 1;
+    } else {
+      byDay.set(day, { sum: v, count: 1 });
+    }
+  }
+
+  return [...byDay.entries()]
+    .map(([day, { sum, count }]) => ({ day, avg: sum / count, count }))
+    .sort((a, b) => a.day.localeCompare(b.day));
 }

@@ -11,7 +11,7 @@ import { t } from './lib/i18n';
 export default function App() {
   const [lang, setLang] = useLang();
   const [thresholds, setThresholds, resetThresholds] = useThresholds();
-  const [tab, setTab] = useState<Tab>('detail');
+  const [tab, setTab] = useState<Tab>('overview');
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   return (
@@ -32,11 +32,14 @@ export default function App() {
             <button
               type="button"
               onClick={() => setSettingsOpen(true)}
-              className="btn-ghost !px-2"
+              className="btn-primary gap-2 !px-4 !py-2.5 text-base shadow-sm"
               aria-label={t('settings', lang)}
               title={t('settings', lang)}
             >
-              ⚙︎
+              <span aria-hidden className="text-lg leading-none">
+                ⚙︎
+              </span>
+              <span>{t('settings', lang)}</span>
             </button>
           </div>
         </div>
@@ -46,7 +49,7 @@ export default function App() {
         {tab === 'detail' ? (
           <Detail lang={lang} thresholds={thresholds} />
         ) : (
-          <Overview lang={lang} thresholds={thresholds} />
+          <Overview lang={lang} thresholds={thresholds} onThresholdsChange={setThresholds} />
         )}
         <p className="mt-6 text-center text-xs text-stone-400">{t('footerHint', lang)}</p>
       </main>

@@ -23,7 +23,7 @@ export interface FeedsResponse {
   range: { from: string; to: string; preset: Preset };
 }
 
-export type Preset = '24h' | '7d' | '30d' | 'custom';
+export type Preset = '6h' | '24h' | '7d' | '30d' | 'custom';
 
 export interface FetchArgs {
   preset: Preset;

@@ -14,17 +14,16 @@ import type { WindowStat } from '../lib/aggregate';
 import { METRIC_META } from '../lib/metrics';
 import { t, type Lang } from '../lib/i18n';
 import type { Thresholds } from '../lib/thresholds';
-import { formatMsk } from '../lib/tz';
+import { fullStamp, shortTick } from '../lib/tz';
 
 interface Props {
   metric: MetricKey;
   stats: WindowStat[];
   thresholds: Thresholds;
   lang: Lang;
-  windowHours: number;
 }
 
-export function OverviewChart({ metric, stats, thresholds, lang, windowHours }: Props) {
+export function OverviewChart({ metric, stats, thresholds, lang }: Props) {
   const meta = METRIC_META[metric];
   if (stats.length === 0) {
     return <p className="card text-sm text-stone-500">{t('noReadings', lang)}</p>;
@@ -41,20 +40,10 @@ export function OverviewChart({ metric, stats, thresholds, lang, windowHours }: 
   }));
 
   const [lo, hi] = thresholds[metric];
+  const spanDays = stats.length > 1 ? (stats[stats.length - 1]!.midMs - stats[0]!.midMs) / (24 * 60 * 60 * 1000) : 0;
+  const showDayTicks = spanDays > 1;
+  const xTickFormatter = (ms: number) => shortTick(ms, showDayTicks ? 'days' : 'hours');
 
-  // X tick: show date when window spans ≥1 day (24h), otherwise show time only.
-  // For 6-h windows: show "23 Apr 06:00" on the first window of a day, "06:00" on others.
-  const seenDays = new Set<string>();
-  const xTickFormatter = (ms: number) => {
-    const dayLabel = formatMsk(ms, 'd MMM');
-    const timeLabel = formatMsk(ms, 'HH:mm');
-    if (windowHours >= 24) return dayLabel;
-    if (!seenDays.has(dayLabel)) {
-      seenDays.add(dayLabel);
-      return `${dayLabel}\n${timeLabel}`;
-    }
-    return timeLabel;
-  };
 
   return (
     <div className="card">
@@ -73,11 +62,11 @@ export function OverviewChart({ metric, stats, thresholds, lang, windowHours }: 
               tickFormatter={xTickFormatter}
               stroke="#a8a29e"
               tick={{ fontSize: 10, fill: '#78716c' }}
-              minTickGap={windowHours >= 24 ? 28 : 40}
+              minTickGap={showDayTicks ? 24 : 40}
               interval="preserveStartEnd"
-              angle={-35}
-              textAnchor="end"
-              height={50}
+              angle={showDayTicks ? 0 : -35}
+              textAnchor={showDayTicks ? 'middle' : 'end'}
+              height={showDayTicks ? 30 : 50}
             />
             <YAxis
               stroke="#a8a29e"
@@ -89,9 +78,7 @@ export function OverviewChart({ metric, stats, thresholds, lang, windowHours }: 
             />
             <Tooltip
               contentStyle={{ borderRadius: 12, borderColor: '#d6d3d1', fontSize: 12 }}
-              labelFormatter={(ms) =>
-                formatMsk(Number(ms), windowHours >= 24 ? 'd MMM yyyy' : 'd MMM yyyy HH:mm')
-              }
+              labelFormatter={(ms) => fullStamp(Number(ms))}
               formatter={(_: number, _name: string, item: { payload?: typeof data[number] }) => {
                 const p = item.payload;
                 if (!p) return null;

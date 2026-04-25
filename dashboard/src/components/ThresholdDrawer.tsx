@@ -46,6 +46,10 @@ export function ThresholdDrawer({ open, onClose, thresholds, onSave, onReset, la
         return;
       }
     }
+    if (!Number.isFinite(draft.avgTempDaysAbove)) {
+      setError(`${t('avgTempDaysAbove', lang)}: ${t('threshold', lang)}`);
+      return;
+    }
     onSave(draft);
     onClose();
   }
@@ -102,6 +106,27 @@ export function ThresholdDrawer({ open, onClose, thresholds, onSave, onReset, la
               </div>
             );
           })}
+          <div>
+            <div className="mb-1 text-sm font-medium text-stone-700">
+              {t('avgTempDaysAbove', lang)} <span className="text-stone-400">({t('unitC', lang)})</span>
+            </div>
+            <label className="text-xs text-stone-500">
+              {t('threshold', lang)}
+              <input
+                type="number"
+                step="0.1"
+                value={draft.avgTempDaysAbove}
+                onChange={(e) =>
+                  setDraft((prev) => ({
+                    ...prev,
+                    avgTempDaysAbove: Number(e.target.value),
+                  }))
+                }
+                className="mt-1 w-full rounded-lg border border-stone-300 px-3 py-2 text-base"
+              />
+            </label>
+            <p className="mt-1 text-xs text-stone-500">{t('avgTempDaysAboveHint', lang)}</p>
+          </div>
         </div>
         {error ? <p className="mt-3 text-sm text-red-600">{error}</p> : null}
         <div className="mt-5 flex flex-col gap-2">

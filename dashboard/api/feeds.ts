@@ -5,7 +5,7 @@ const CUTOFF_ISO = '2026-04-01T00:00:00+03:00';
 const TZ = 'Europe/Moscow';
 const THINGSPEAK_BASE = 'https://api.thingspeak.com';
 
-type Preset = '24h' | '7d' | '30d' | 'custom';
+type Preset = '6h' | '24h' | '7d' | '30d' | 'custom';
 
 interface ThingSpeakFeed {
   created_at: string;
@@ -45,6 +45,7 @@ function toThingSpeakTimestamp(d: Date): string {
 }
 
 function pickAverage(preset: Preset, spanMs: number): number | undefined {
+  if (preset === '6h') return undefined;
   if (preset === '24h') return undefined;
   if (preset === '7d') return 10;
   if (preset === '30d') return 60;
@@ -66,6 +67,9 @@ function resolveRange(q: VercelRequest['query']): {
   const preset = (typeof q.range === 'string' ? q.range : '7d') as Preset;
   const cutoff = new Date(CUTOFF_ISO);
 
+  if (preset === '6h') {
+    return { preset, start: new Date(now.getTime() - 6 * 60 * 60 * 1000), end: now };
+  }
   if (preset === '24h') {
     return { preset, start: new Date(now.getTime() - 24 * 60 * 60 * 1000), end: now };
   }
