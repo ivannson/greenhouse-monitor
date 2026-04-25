@@ -1,0 +1,37 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    overscroll-behavior-y: none;
+  }
+  /* Make native date inputs feel native on iOS */
+  input[type='date'] {
+    -webkit-appearance: none;
+    appearance: none;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center rounded-full px-4 py-2 text-sm font-medium transition active:scale-[0.98];
+  }
+  .btn-primary {
+    @apply btn bg-leaf-700 text-white hover:bg-leaf-800;
+  }
+  .btn-ghost {
+    @apply btn bg-stone-100 text-stone-800 hover:bg-stone-200;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium;
+  }
+  .card {
+    @apply rounded-2xl bg-white p-4 shadow-sm ring-1 ring-stone-200;
+  }
+}
