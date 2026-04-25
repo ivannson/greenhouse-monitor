@@ -2,11 +2,22 @@
 
 A PlatformIO project for monitoring greenhouse environmental conditions using ESP32-C3-SuperMini.
 
+For non-technical operating instructions, see [END_USER_GUIDE.md](END_USER_GUIDE.md).
+
+For the Russian non-technical user guide, see [END_USER_GUIDE_RU.md](END_USER_GUIDE_RU.md).
+
+For technical operating details, setup flow, LED meanings, button behavior, and WiFi troubleshooting, see [USER_GUIDE.md](USER_GUIDE.md).
+
+For the mobile web dashboard (Vite + React, deployed on Vercel), see [dashboard/README.md](dashboard/README.md).
+
 ## Hardware
 
 - **Board**: ESP32-C3-SuperMini
 - **Framework**: Arduino
-- **Sensors**: Temperature, Humidity, Light Level
+- **Sensors**: AHT20 temperature/humidity, BMP280 temperature/pressure
+- **Storage**: SD card over SPI
+- **Status**: WS2812 / NeoPixel status LED
+- **Setup input**: Configuration button for WiFi setup mode
 
 ## Project Structure
 
@@ -50,10 +61,15 @@ Edit `platformio.ini` to:
 
 ## Pin Connections
 
-Update pin definitions in `src/main.cpp` based on your sensor connections:
-- Temperature sensor: Currently set to A0
-- Humidity sensor: Currently set to A1
-- Light sensor: Currently set to A2
+Pin definitions are in `src/main.cpp`:
+
+- Status LED: GPIO 3
+- Configuration button: GPIO 21, active low
+- SD card CS: GPIO 7
+- SD card MOSI: GPIO 6
+- SD card MISO: GPIO 5
+- SD card SCK: GPIO 4
+- AHT20 and BMP280: I2C using the board defaults
 
 ## Development
 
@@ -61,4 +77,3 @@ Update pin definitions in `src/main.cpp` based on your sensor connections:
 - Upload: `pio run --target upload`
 - Monitor: `pio device monitor`
 - Clean: `pio run --target clean`
-

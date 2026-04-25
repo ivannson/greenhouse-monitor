@@ -10,43 +10,269 @@
 #include <esp_sleep.h>
 #include <esp_wifi.h>
 #include <esp_bt.h>
+#include <SPI.h>
+#include <SD.h>
+#include <Adafruit_NeoPixel.h>
+#include "time.h"
 
 // ============================================================
 // DEEP SLEEP CONFIGURATION
 // ============================================================
 // How long the ESP32 sleeps between sensor readings (in seconds)
-const uint32_t DEEP_SLEEP_SECONDS = 30;
+const uint32_t DEEP_SLEEP_SECONDS = 600; // 10 minutes
 // Convert to microseconds for esp_sleep API
 const uint64_t DEEP_SLEEP_US = (uint64_t)DEEP_SLEEP_SECONDS * 1000000ULL;
+// WiFi retry configuration
+const uint8_t WIFI_MAX_ATTEMPTS = 10;
+const unsigned long WIFI_RETRY_DELAY_MS = 10000;
+const unsigned long WIFI_CONNECT_TIMEOUT_MS = 10000;
+const unsigned long CAPTIVE_PORTAL_TIMEOUT_MS = 5UL * 60UL * 1000UL; // 5 minutes
+// SD card SPI pins (ESP32-C3 SuperMini)
+const int SD_CS_PIN = 7;
+const int SD_MOSI_PIN = 6;
+const int SD_MISO_PIN = 5;
+const int SD_SCK_PIN = 4;
+const char *DATA_FILE = "/data.csv";
+// Status LED (WS2812 / NeoPixel)
+const uint8_t STATUS_LED_PIN = 3;
+const uint8_t STATUS_LED_COUNT = 1;
+const uint8_t STATUS_LED_BRIGHTNESS = 32;
+const uint8_t STATUS_LED_SLEEP_BRIGHTNESS = 8;
+const uint8_t WIFI_RED_THRESHOLD = 5;
+const char *PREF_FAIL_LATCH = "failLatch";
 // ============================================================
 
 // Sensor objects
 Adafruit_AHTX0 aht;
 Adafruit_BMP280 bmp; // I2C
+Adafruit_NeoPixel statusPixel(STATUS_LED_COUNT, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
 
 Preferences prefs;
 WebServer server(80);
 DNSServer dnsServer;
 bool portalActive = false;
 bool connectRequested = false;
+bool portalFromFailure = false;
+unsigned long portalStartMs = 0;
 const int configButtonPin = 21; // GPIO to force portal
 const unsigned long buttonDebounceMs = 50;
 bool buttonLastState = HIGH;
 unsigned long buttonLastChangeMs = 0;
 String lastStatusMessage = "Idle";
 const String maskedIpPlaceholder = "xxx.xxx.xx.xxx";
+bool sdReady = false;
+bool timeSynced = false;
+bool wifiFailureLatched = false;
+
+// Forward declarations
+void startCaptivePortal(bool fromFailure = false);
+void checkConfigButtonPress();
 
 // ThingSpeak settings
 const char *thingspeakApiKey = "YOUR_THINGSPEAK_WRITE_API_KEY";
 const char *thingspeakEndpoint = "http://api.thingspeak.com/update";
 
 // Captive portal / AP settings
-const char *apSsid = "ESP32-WiFi-Config";
+const char *apSsid = "greenhouse-temperature-setup";
 const char *apPassword = "";
 
 String maskIp(const IPAddress &ip) {
     (void)ip;
     return maskedIpPlaceholder;
+}
+
+void statusLedOff() {
+    statusPixel.clear();
+    statusPixel.show();
+}
+
+void setStatusLedColor(uint8_t r, uint8_t g, uint8_t b) {
+    statusPixel.setPixelColor(0, statusPixel.Color(r, g, b));
+    statusPixel.show();
+}
+
+void indicateWifiDisconnected() {
+    setStatusLedColor(255, 0, 0);
+}
+
+void indicateApMode() {
+    setStatusLedColor(0, 0, 255);
+}
+
+void indicateWifiConnected() {
+    setStatusLedColor(0, 255, 0);
+}
+
+void initStatusLed() {
+    statusPixel.begin();
+    statusPixel.setBrightness(STATUS_LED_BRIGHTNESS);
+    statusLedOff();
+}
+
+void serviceBackground() {
+    checkConfigButtonPress();
+    if (portalActive) {
+        dnsServer.processNextRequest();
+        server.handleClient();
+    }
+}
+
+void waitWithBackground(unsigned long waitMs, bool flashRetry = false, unsigned long blinkPeriodMs = 500) {
+    unsigned long start = millis();
+    unsigned long lastBlink = millis();
+    bool blinkState = false; // false = red, true = white
+    bool firstBlink = true;
+    unsigned long halfPeriod = blinkPeriodMs / 2;
+
+    while (millis() - start < waitMs) {
+        serviceBackground();
+        if (portalActive) {
+            break; // user requested portal; abort wait work (e.g., retries)
+        }
+
+        if (flashRetry) {
+            unsigned long now = millis();
+            if (firstBlink || (now - lastBlink) >= halfPeriod) {
+                firstBlink = false;
+                lastBlink = now;
+                blinkState = !blinkState;
+                if (blinkState) {
+                    setStatusLedColor(255, 255, 255); // white
+                } else {
+                    setStatusLedColor(255, 0, 0); // red
+                }
+            }
+        }
+
+        delay(1); // yield to WiFi/RTOS while still responsive to button
+    }
+}
+
+void indicatePowerOnWhite(unsigned long durationMs = 2000) {
+    setStatusLedColor(255, 255, 255);
+    waitWithBackground(durationMs);
+    statusLedOff();
+}
+
+void indicateDataWrite(bool success) {
+    if (success) {
+        setStatusLedColor(0, 255, 0); // green for success
+    } else {
+        setStatusLedColor(128, 0, 128); // purple for failure
+    }
+    waitWithBackground(1000);
+    statusLedOff();
+}
+
+void setWifiFailureLatched(bool latched) {
+    if (wifiFailureLatched == latched) {
+        return;
+    }
+    wifiFailureLatched = latched;
+    prefs.putBool(PREF_FAIL_LATCH, wifiFailureLatched);
+    if (wifiFailureLatched) {
+        indicateWifiDisconnected();
+    }
+}
+
+bool initSdCard() {
+    if (sdReady) {
+        return true;
+    }
+
+    SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
+
+    if (!SD.begin(SD_CS_PIN)) {
+        Serial.println("SD card initialization failed");
+        return false;
+    }
+
+    sdReady = true;
+    Serial.println("SD card initialized");
+    return true;
+}
+
+bool ensureDataFileExists() {
+    if (!sdReady && !initSdCard()) {
+        return false;
+    }
+
+    if (SD.exists(DATA_FILE)) {
+        return true;
+    }
+
+    File file = SD.open(DATA_FILE, FILE_WRITE);
+    if (!file) {
+        Serial.println("Failed to create data.csv");
+        return false;
+    }
+
+    file.println("time (UTC), date, sent_to_cloud, temp_1, temp_2, humidity, pressure");
+    file.close();
+    Serial.println("Created data.csv with header");
+    return true;
+}
+
+bool syncTimeFromNtp() {
+    if (timeSynced) {
+        return true;
+    }
+
+    configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+
+    unsigned long start = millis();
+    struct tm timeinfo;
+    while ((millis() - start) < 8000) {
+        if (getLocalTime(&timeinfo, 500)) {
+            timeSynced = true;
+            Serial.println("Time synchronized via NTP");
+            return true;
+        }
+        delay(200);
+    }
+
+    Serial.println("Failed to synchronize time");
+    return false;
+}
+
+bool getUtcStrings(String &timeStr, String &dateStr) {
+    struct tm timeinfo;
+    if (!getLocalTime(&timeinfo, 1000)) {
+        return false;
+    }
+
+    char buffer[16];
+    strftime(buffer, sizeof(buffer), "%H:%M:%S", &timeinfo);
+    timeStr = buffer;
+
+    strftime(buffer, sizeof(buffer), "%Y-%m-%d", &timeinfo);
+    dateStr = buffer;
+    return true;
+}
+
+bool logReadingToSd(float temp1, float temp2, float humidity, float pressure, bool sentToCloud) {
+    if (!ensureDataFileExists()) {
+        return false;
+    }
+
+    String timeStr, dateStr;
+    if (!getUtcStrings(timeStr, dateStr)) {
+        timeStr = "00:00:00";
+        dateStr = "1970-01-01";
+    }
+
+    File file = SD.open(DATA_FILE, FILE_APPEND);
+    if (!file) {
+        Serial.println("Failed to open data.csv for append");
+        return false;
+    }
+
+    String row = timeStr + ", " + dateStr + ", " + String(sentToCloud ? 1 : 0) + ", " +
+                 String(temp1, 2) + ", " + String(temp2, 2) + ", " + String(humidity, 2) + ", " +
+                 String(pressure, 2);
+    size_t written = file.println(row);
+    file.close();
+    return written > 0;
 }
 
 bool readStoredCredentials(String &ssid, String &password) {
@@ -60,7 +286,7 @@ void logStatus(const String &msg) {
     Serial.println(msg);
 }
 
-bool connectWithStoredCredentials(bool keepAP = false) {
+bool connectWithStoredCredentials(bool keepAP = false, unsigned long connectTimeoutMs = WIFI_CONNECT_TIMEOUT_MS) {
     String ssid, password;
     if (!readStoredCredentials(ssid, password)) {
         logStatus("No stored WiFi credentials");
@@ -73,20 +299,74 @@ bool connectWithStoredCredentials(bool keepAP = false) {
     WiFi.begin(ssid.c_str(), password.c_str());
 
     unsigned long start = millis();
-    const unsigned long connectTimeoutMs = 15000;
-    while (WiFi.status() != WL_CONNECTED && (millis() - start) < connectTimeoutMs) {
-        delay(200);
-        Serial.print(".");
+    unsigned long lastDot = 0;
+    while (WiFi.status() != WL_CONNECTED &&
+           (millis() - start) < connectTimeoutMs &&
+           !(portalActive && !keepAP)) {
+        serviceBackground();
+        if (millis() - lastDot > 500) {
+            Serial.print(".");
+            lastDot = millis();
+        }
+        delay(1); // allow WiFi stack to progress
     }
     Serial.println();
 
+    if (portalActive && !keepAP) {
+        logStatus("Connection attempt aborted due to captive portal");
+        return false;
+    }
+
     if (WiFi.status() == WL_CONNECTED) {
         logStatus("WiFi connected. IP: " + maskIp(WiFi.localIP()));
+        indicateWifiConnected();
+        if (wifiFailureLatched) {
+            setWifiFailureLatched(false);
+        }
         return true;
     }
 
     logStatus("WiFi connection failed.");
     return false;
+}
+
+bool connectWithRetries(uint8_t maxAttempts, unsigned long retryDelayMs, bool keepAP = false) {
+    for (uint8_t attempt = 1; attempt <= maxAttempts; attempt++) {
+        if (portalActive) {
+            logStatus("Aborting WiFi retries because captive portal is active");
+            return false;
+        }
+        logStatus("WiFi connection attempt " + String(attempt) + " of " + String(maxAttempts));
+        if (connectWithStoredCredentials(keepAP)) {
+            return true;
+        }
+
+        if (attempt >= WIFI_RED_THRESHOLD && !keepAP) {
+            setWifiFailureLatched(true);
+        }
+
+        if (attempt < maxAttempts) {
+            logStatus("Retrying WiFi in " + String(retryDelayMs / 1000) + " seconds...");
+            waitWithBackground(retryDelayMs, true);
+        }
+    }
+
+    logStatus("WiFi connection failed after retries.");
+    return false;
+}
+
+void checkConfigButtonPress() {
+    bool currentState = digitalRead(configButtonPin);
+
+    if (currentState != buttonLastState && (millis() - buttonLastChangeMs) > buttonDebounceMs) {
+        buttonLastChangeMs = millis();
+        buttonLastState = currentState;
+
+        if (currentState == LOW) {
+            logStatus("Config button pressed - starting captive portal");
+            startCaptivePortal();
+        }
+    }
 }
 
 String getConfigPage() {
@@ -261,15 +541,24 @@ void handleScan() {
     delete[] secures;
 }
 
-void startCaptivePortal() {
+void startCaptivePortal(bool fromFailure) {
+    if (portalActive) {
+        logStatus("Captive portal already running");
+        return;
+    }
+
+    portalFromFailure = fromFailure;
+    portalStartMs = millis();
+
     logStatus("Starting access point for WiFi setup...");
 
     WiFi.disconnect(true);
-    delay(100);
+    waitWithBackground(100);
 
     WiFi.mode(WIFI_AP_STA);
-    delay(100);
+    waitWithBackground(100);
     WiFi.softAP(apSsid, apPassword);
+    indicateApMode();
 
     IPAddress ip = WiFi.softAPIP();
     logStatus("AP IP: " + ip.toString());
@@ -314,14 +603,16 @@ void stopCaptivePortal() {
         server.stop();
         WiFi.softAPdisconnect(true);
         portalActive = false;
+        portalFromFailure = false;
+        portalStartMs = 0;
         logStatus("Captive portal stopped.");
     }
 }
 
-void sendToThingSpeak(float temp1, float temp2, float humidity, float pressure) {
+bool sendToThingSpeak(float temp1, float temp2, float humidity, float pressure) {
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("WiFi not connected, skipping ThingSpeak update");
-        return;
+        return false;
     }
 
     HTTPClient http;
@@ -344,10 +635,16 @@ void sendToThingSpeak(float temp1, float temp2, float humidity, float pressure) 
     }
 
     http.end();
+    return httpCode > 0 && httpCode < 300;
 }
 
 void goToDeepSleep() {
     logStatus("Entering deep sleep for " + String(DEEP_SLEEP_SECONDS) + " seconds");
+    statusPixel.setBrightness(STATUS_LED_SLEEP_BRIGHTNESS);
+    setStatusLedColor(255, 255, 255); // dim white indicator before sleep
+    waitWithBackground(200);
+    statusLedOff();
+    statusPixel.setBrightness(STATUS_LED_BRIGHTNESS);
     
     // Stop any active services
     stopCaptivePortal();
@@ -393,13 +690,24 @@ void publishOnceThenSleep() {
     Serial.println(" hPa");
     Serial.println("-----------------------------");
 
-    sendToThingSpeak(ahtTemp, bmpTemp, relHumidity, pressure);
+    if (WiFi.status() == WL_CONNECTED) {
+        syncTimeFromNtp();
+    }
+
+    bool sent = sendToThingSpeak(ahtTemp, bmpTemp, relHumidity, pressure);
+    bool writeOk = logReadingToSd(ahtTemp, bmpTemp, relHumidity, pressure, sent);
+    indicateDataWrite(writeOk);
     goToDeepSleep();
 }
 
 void setup() {
     Serial.begin(115200);
-    delay(200);
+    initStatusLed();
+    
+    pinMode(configButtonPin, INPUT_PULLUP);
+    buttonLastState = digitalRead(configButtonPin);
+    bool buttonHeldOnBoot = buttonLastState == LOW;
+    indicatePowerOnWhite();
     
     Wire.begin(); // uses default SDA/SCL for the board
     
@@ -433,11 +741,15 @@ void setup() {
     
     Serial.println("\nStarting sensor readings...\n");
 
-    pinMode(configButtonPin, INPUT_PULLUP);
-    buttonLastState = digitalRead(configButtonPin);
-    bool buttonHeldOnBoot = buttonLastState == LOW;
-
     prefs.begin("wifi", false);
+    wifiFailureLatched = prefs.getBool(PREF_FAIL_LATCH, false);
+    if (wifiFailureLatched) {
+        indicateWifiDisconnected();
+    } else {
+        statusLedOff();
+    }
+    initSdCard();
+    ensureDataFileExists();
 
     if (buttonHeldOnBoot) {
         logStatus("Config button held - starting captive portal");
@@ -445,14 +757,17 @@ void setup() {
         return;
     }
 
-    if (connectWithStoredCredentials()) {
+    if (connectWithRetries(WIFI_MAX_ATTEMPTS, WIFI_RETRY_DELAY_MS)) {
         publishOnceThenSleep();
     } else {
-        startCaptivePortal();
+        logStatus("WiFi retries exhausted - starting captive portal for 5 minutes");
+        startCaptivePortal(true);
     }
 }
 
 void loop() {
+    checkConfigButtonPress();
+
     // Handle captive portal requests if running
     if (portalActive) {
         dnsServer.processNextRequest();
@@ -475,5 +790,13 @@ void loop() {
         publishOnceThenSleep();
     }
 
-    delay(portalActive ? 50 : 1000);
+    // If portal was started after failed retries, limit its uptime before sleeping
+    if (portalActive && portalFromFailure &&
+        WiFi.status() != WL_CONNECTED &&
+        !connectRequested &&
+        (millis() - portalStartMs >= CAPTIVE_PORTAL_TIMEOUT_MS)) {
+        logStatus("Captive portal timeout reached - going to deep sleep");
+        stopCaptivePortal();
+        goToDeepSleep();
+    }
 }
